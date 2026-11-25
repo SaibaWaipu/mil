@@ -46,15 +46,37 @@ pub fn render_page(
     // absolute x coordinate of each inline span cannot be used verbatim:
     // adjacent spans would overlap. Instead, start each visual line at the
     // first span's indent and place subsequent spans contiguously.
-    let mut last_row: Option<u16> = None;
+    let mut runs = page.text_runs();
+    // DOM order is not reading order once CSS positions elements. Visit runs
+    // top-to-bottom, left-to-right so continuation state follows what a human
+    // sees rather than the document tree.
+    runs.sort_by(|a, b| {
+        let a_row = (a.y / pixel_height as f32).floor() as i32;
+        let b_row = (b.y / pixel_height as f32).floor() as i32;
+        a_row.cmp(&b_row).then_with(|| a.x.total_cmp(&b.x))
+    });
+
+    let mut last_y: Option<f32> = None;
     let mut next_col: u16 = 0;
-    for run in page.text_runs() {
+    for run in runs {
+        let run_y = run.y;
         let mut row = (f64::from(run.y) / pixel_height).floor().max(0.0) as u16;
         let indent = (f64::from(run.x) / pixel_width).floor().max(0.0) as u16;
-        let mut col = match last_row {
-            Some(previous) if previous == row => next_col,
-            _ => indent,
-        };
+        // CSS line heights are fractional: adjacent spans on the same visual
+        // line can differ by a pixel or two. Compare against the previous
+        // baseline rather than the truncated cell row.
+        let tolerance = (pixel_height / 2.0) as f32;
+        let x_col = (f64::from(run.x) / pixel_width).floor().max(0.0) as u16;
+        let horizontally_contiguous =
+            x_col <= next_col.saturating_add(3) && next_col <= x_col.saturating_add(3);
+        let same_line = last_y.is_some_and(|previous| (run.y - previous).abs() < tolerance)
+            && horizontally_contiguous;
+        let mut col = if same_line { next_col } else { indent };
+        // A run positioned beyond the right edge (often a hidden dropdown
+        // laid out off-screen) must be skipped, not wrapped one glyph per row.
+        if col >= width_cells {
+            continue;
+        }
         let style = CellStyle {
             fg: run.style.color,
             bold: run.style.bold,
@@ -83,7 +105,7 @@ pub fn render_page(
             }
         }
         next_col = col;
-        last_row = Some(row);
+        last_y = Some(run_y);
     }
 
     // Images last: they occupy cells exclusively and carry PNG pixels.

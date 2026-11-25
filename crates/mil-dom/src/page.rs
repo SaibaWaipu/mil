@@ -11,6 +11,55 @@ use mil_paint::Rgb;
 use style::values::computed::{FontStyle, TextDecorationLine};
 use url::Url;
 
+/// `blitz-html` reports parse errors with `println!`, which would paint
+/// diagnostics straight into the alternate screen. Redirect stdout to
+/// `/dev/null` for the duration of parsing (single-threaded by design).
+#[cfg(unix)]
+struct SilenceStdout {
+    saved: std::os::fd::RawFd,
+    devnull: std::os::fd::RawFd,
+}
+
+#[cfg(unix)]
+impl SilenceStdout {
+    fn new() -> Self {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        unsafe {
+            let saved = libc::dup(1);
+            let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
+            if saved >= 0 && devnull >= 0 {
+                libc::dup2(devnull, 1);
+            }
+            Self { saved, devnull }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SilenceStdout {
+    fn drop(&mut self) {
+        unsafe {
+            if self.saved >= 0 {
+                libc::dup2(self.saved, 1);
+                libc::close(self.saved);
+            }
+            if self.devnull >= 0 {
+                libc::close(self.devnull);
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct SilenceStdout;
+#[cfg(not(unix))]
+impl SilenceStdout {
+    fn new() -> Self {
+        Self
+    }
+}
+
 /// A parsed HTML document, its URL and its title.
 pub struct Page {
     /// The underlying Blitz document. Styles and layout are resolved by
@@ -25,6 +74,7 @@ pub struct Page {
 impl Page {
     /// Parse `html` into a page rooted at `url`, using `viewport` for layout.
     pub fn from_html(html: &str, url: &Url, viewport: Viewport) -> Result<Self> {
+        let _quiet = SilenceStdout::new();
         let config = DocumentConfig {
             viewport: Some(viewport),
             base_url: Some(url.to_string()),
@@ -46,7 +96,18 @@ impl Page {
     /// Restyle and relayout the document. `now` is the animation clock in
     /// seconds.
     pub fn resolve(&mut self, now: f64) {
+        let _quiet = SilenceStdout::new();
         self.doc.resolve(now);
+    }
+
+    /// Attach a fetched author stylesheet to its `<link>` element.
+    pub fn add_stylesheet(&mut self, node_id: usize, css: &str) -> Result<()> {
+        let _quiet = SilenceStdout::new();
+        let stylesheet = self
+            .doc
+            .make_stylesheet(css, style::stylesheets::origin::Origin::Author);
+        self.doc.add_stylesheet_for_node(stylesheet, node_id);
+        Ok(())
     }
 
     /// Document title.
@@ -121,7 +182,10 @@ impl Page {
         let scroll = doc.viewport_scroll();
         let mut raw: Vec<RawRun> = Vec::new();
 
-        for (_, node) in doc.tree().iter() {
+        for (id, node) in doc.tree().iter() {
+            if is_non_rendering(doc, id) {
+                continue;
+            }
             let Some(text_layout) = node
                 .element_data()
                 .and_then(|element| element.inline_layout_data.as_ref())
@@ -213,6 +277,9 @@ impl Page {
         let mut links = Vec::new();
         let mut link_indices = HashMap::new();
         for anchor_id in anchor_ids {
+            if is_non_rendering(doc, anchor_id) {
+                continue;
+            }
             let Some(node) = doc.get_node(anchor_id) else {
                 continue;
             };
@@ -328,6 +395,32 @@ pub struct LinkRegion {
     pub height: f32,
     /// Id of the `<a>` element in the Blitz DOM.
     pub node_id: usize,
+}
+
+/// Elements whose contents must never appear as terminal text or links.
+/// Scripts/styles are hidden by the UA stylesheet, and `noscript` is noise
+/// for a client that can execute at least some JavaScript.
+fn is_non_rendering(doc: &BaseDocument, mut id: usize) -> bool {
+    loop {
+        let Some(node) = doc.get_node(id) else {
+            return true;
+        };
+        if let Some(element) = node.element_data() {
+            let name = &element.name.local;
+            if *name == local_name!("script")
+                || *name == local_name!("style")
+                || *name == local_name!("noscript")
+                || *name == local_name!("template")
+                || *name == local_name!("head")
+            {
+                return true;
+            }
+        }
+        match node.parent {
+            Some(parent) => id = parent,
+            None => return false,
+        }
+    }
 }
 
 fn text_style(node: &Node, font_size: f32) -> Option<TextStyle> {

@@ -120,7 +120,7 @@ The event loop runs on a current-thread Tokio runtime because `blitz_dom::BaseDo
 
 Configuration is read from `~/.config/mil/config.toml` (or `$XDG_CONFIG_HOME/mil/config.toml`, or the file named by `MIL_CONFIG`). A missing file simply means built-in defaults are used; `mil` does not create one automatically on first run. Mutable state lives separately in `~/.local/state/mil/` (`session.json` and `bookmarks.json`). Writes are atomic and, on Unix, created with mode `0600`.
 
-JavaScript is **off by default**; enable it with `[javascript] enabled = true` (or disable it for one run with `--no-js`). The search template is `search_engine = "https://www.google.com/search?q={}"`, where `{}` is the URL-encoded query placeholder. Theme, keybinding, image, network and UI sections are documented in [docs/CONFIG.md](docs/CONFIG.md).
+JavaScript is **off by default**; enable it with `[javascript] enabled = true` (or disable it for one run with `--no-js`). The search template is `search_engine = "https://www.bing.com/search?q={}"`, where `{}` is the URL-encoded query placeholder. Theme, keybinding, image, network and UI sections are documented in [docs/CONFIG.md](docs/CONFIG.md).
 
 ## Limitations
 
@@ -131,6 +131,12 @@ JavaScript is **off by default**; enable it with `[javascript] enabled = true` (
 - **Binary size.** Much smaller than Chromium, but Stylo, Taffy and Parley are linked in.
 - **Not a general-purpose browser.** No extensions, PDFs, DRM, WebGL, video playback, service workers or media playback. Windows support is best-effort.
 - **Work in progress.** Find highlighting, a full help screen, link focus rings, end-to-end form submission, scripted image policy overrides, benchmark results and per-OS release smoke tests are still open.
+
+## Real-world surfing notes
+
+`mil` reads the HTML a server sends, so usable sites are mostly those with a real server-rendered page: Hacker News, Wikipedia, Bing search, and many documentation sites work reasonably. Google Search stopped shipping results in its HTML in 2025 and now shows a "No readable content" hint in `mil`; DuckDuckGo's HTML endpoint and some large sites serve bot challenges. The default search template uses Bing, which still returns static results.
+
+Linked CSS can be fetched with `MIL_LOAD_STYLESHEETS=1`, but it is **off by default**: Blitz 0.2 does not implement every selector modern sites use to hide menus, so applying their CSS can expose hidden content. `MIL_IMAGE_PROTOCOL=none` skips terminal graphics probing (useful in tmux/CI).
 
 ## Testing
 

@@ -17,6 +17,7 @@ blitz-paint = { version = "=0.2.1", default-features = false }
 blitz-traits = "=0.2.0"
 image = { workspace = true }
 kurbo = "0.12"
+libc = "0.2"
 mil-paint = { path = "../mil-paint" }
 parley = "0.6"
 peniko = "0.5"

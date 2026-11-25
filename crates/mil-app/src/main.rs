@@ -222,7 +222,7 @@ fn resolve_input(input: &str, config: &Config) -> Url {
     let template = if config.search_engine.contains("{}") {
         config.search_engine.clone()
     } else {
-        "https://www.google.com/search?q={}".to_owned()
+        "https://www.bing.com/search?q={}".to_owned()
     };
     Url::parse(&template.replace("{}", &query))
         .unwrap_or_else(|_| Url::parse(&format!("{DEFAULT_HOME}?q={query}")).expect("valid URL"))
@@ -479,6 +479,7 @@ impl App {
         );
         let mut page = Page::from_html(&html, &final_url, viewport)
             .with_context(|| format!("parsing {}", final_url))?;
+        self.load_stylesheets(&mut page).await;
         page.resolve(0.0);
         if self.config.javascript.enabled {
             self.run_scripts(&html, &mut page, &final_url);
@@ -493,6 +494,16 @@ impl App {
         let chrome = if self.tabs.len() > 1 { 3 } else { 2 };
         let visible_rows = rows.saturating_sub(chrome).max(1);
         let scroll_max_y = surface.height.saturating_sub(visible_rows) as f64;
+        let readable_cells = surface
+            .cells()
+            .iter()
+            .filter(|cell| !cell.continuation && !cell.symbol.trim().is_empty())
+            .count();
+        let notice = if readable_cells < 8 {
+            Some("No readable content - site likely requires JavaScript".to_owned())
+        } else {
+            None
+        };
 
         let tab = self.active_tab_mut();
         if record_history && tab.url != final_url {
@@ -509,9 +520,63 @@ impl App {
         tab.surface = Some(surface);
         tab.scroll_y = 0.0;
         tab.scroll_max_y = scroll_max_y.max(0.0);
-        tab.error = None;
+        tab.error = notice;
         self.focused_link = 0;
         Ok(())
+    }
+
+    /// Fetch linked author stylesheets and attach them to their `<link>`
+    /// nodes before layout. Most real sites put their entire design in these
+    /// files; without them the cell-grid rendering is nearly unreadable.
+    async fn load_stylesheets(&self, page: &mut Page) {
+        // Off by default: Blitz 0.2 does not implement all of the selectors
+        // modern sites use to hide menus, so applying their CSS can surface
+        // hidden content and make pages less readable. Opt in when a site is
+        // known to benefit (e.g. Wikipedia or Hacker News).
+        if !std::env::var("MIL_LOAD_STYLESHEETS")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "on" | "true" | "yes"))
+        {
+            return;
+        }
+        const MAX_SHEETS: usize = 8;
+        const MAX_BYTES: u64 = 2 * 1024 * 1024;
+        let links: Vec<(usize, Url)> = JsDomMirror::from_document(&page.doc, page.url.as_str())
+            .nodes
+            .into_iter()
+            .filter(|node| {
+                node.tag.eq_ignore_ascii_case("link")
+                    && node.attrs.get("rel").is_some_and(|rel| {
+                        rel.split_whitespace()
+                            .any(|value| value.eq_ignore_ascii_case("stylesheet"))
+                    })
+            })
+            .filter_map(|node| {
+                let href = node.attrs.get("href")?;
+                let url = page.url.join(href).ok()?;
+                Some((node.id, url))
+            })
+            .take(MAX_SHEETS)
+            .collect();
+
+        let mut total = 0_u64;
+        for (node_id, url) in links {
+            match self.client.get(&url).await {
+                Ok(response) if response.status.is_success() => {
+                    let len = response.body.len() as u64;
+                    if total.saturating_add(len) > MAX_BYTES {
+                        warn!("stylesheet budget exceeded, skipping {url}");
+                        break;
+                    }
+                    total += len;
+                    let css = String::from_utf8_lossy(&response.body);
+                    if let Err(error) = page.add_stylesheet(node_id, &css) {
+                        warn!("could not apply stylesheet {url}: {error:#}");
+                    }
+                }
+                Ok(response) => warn!("stylesheet {url} returned {}", response.status),
+                Err(error) => warn!("could not fetch stylesheet {url}: {error:#}"),
+            }
+        }
     }
 
     /// Execute inline scripts with the deliberately limited rquickjs façade.

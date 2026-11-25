@@ -14,6 +14,8 @@ half-written config, session, or bookmarks file.
 | `MIL_CONFIG` | Use this file path directly. Relative paths are resolved against the current directory. |
 | `XDG_CONFIG_HOME` | Base directory for config lookup (default `~/.config`). Must be absolute; relative values are ignored with a warning. |
 | `XDG_STATE_HOME` | Base directory for mutable state (default `~/.local/state`). Must be absolute; relative values are ignored with a warning. |
+| `MIL_IMAGE_PROTOCOL` | Set to `none`, `off`, or `halfblocks` to skip terminal graphics capability probing (helpful in tmux/CI, where unanswered queries can swallow keystrokes). |
+| `MIL_LOAD_STYLESHEETS` | Set to `1`, `on`, `true`, or `yes` to fetch linked CSS. Off by default: some sites' hidden menus become visible because Blitz 0.2 lacks some selectors. |
 
 Config lookup order (first match wins):
 
@@ -37,7 +39,7 @@ collection.
 # ~/.config/mil/config.toml
 
 homepage = "https://example.com"
-search_engine = "https://www.google.com/search?q={}"
+search_engine = "https://www.bing.com/search?q={}"
 # `{}` is where the URL-encoded omnibox query is substituted. mil-session
 # stores the template verbatim and performs no substitution itself.
 # (Some docs call this placeholder `{query}`; the literal token here is `{}`.)
@@ -81,7 +83,7 @@ table (`[theme]`, `[images]`, etc.) is equivalent to using all of its defaults.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `homepage` | string | `"https://example.com"` | Page opened when no session is restored. |
-| `search_engine` | string | `"https://www.google.com/search?q={}"` | Omnibox search template. `{}` is the query placeholder. |
+| `search_engine` | string | `"https://www.bing.com/search?q={}"` | Omnibox search template. `{}` is the query placeholder. |
 | `user_agent` | string | omitted (`None`) | Optional `User-Agent` override; no default UA is injected by this crate. |
 | `max_width` | integer (`u16`) | omitted (`None`) | Maximum layout width in columns. Omit to follow the terminal width; `0` means a literal zero width. |
 | `theme.palette` | string | `"auto"` | Colour mode; see accepted values below. |

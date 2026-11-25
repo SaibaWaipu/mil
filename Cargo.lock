@@ -1894,6 +1894,7 @@ dependencies = [
  "blitz-traits",
  "image",
  "kurbo",
+ "libc",
  "mil-paint",
  "parley",
  "peniko",

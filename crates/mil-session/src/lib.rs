@@ -39,7 +39,9 @@ use anyhow::Context;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 const DEFAULT_HOMEPAGE: &str = "https://example.com";
-const DEFAULT_SEARCH_ENGINE: &str = "https://www.google.com/search?q={}";
+// Google now requires JavaScript for search results; Bing still serves a
+// complete static result list to plain HTTP clients.
+const DEFAULT_SEARCH_ENGINE: &str = "https://www.bing.com/search?q={}";
 const DEFAULT_PALETTE: &str = "auto";
 const DEFAULT_IMAGE_POLICY: &str = "inline";
 const DEFAULT_IMAGE_PROTOCOL: &str = "auto";
