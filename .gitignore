@@ -1,0 +1,57 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Note: Cargo.lock is intentionally COMMITTED (binary project).
+!/Cargo.lock
+
+# Backup files
+*.bak
+*.swp
+*.swo
+*~
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.iml
+.ropeproject/
+.project/
+.settings/
+.history/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Test and coverage output
+coverage/
+*.profraw
+*.profdata
+tarpaulin-report.html
+lcov.info
+
+# Local mil state if tests or dev runs write inside the repo
+.mil/
+mil-state/
+state/
+sessions/
+bookmarks.toml
+cookies.sqlite
+cookies.sqlite-*
+
+# Logs and temporary artifacts
+*.log
+*.tmp
+*.pid

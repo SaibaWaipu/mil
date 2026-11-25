@@ -1,0 +1,18 @@
+[package]
+name = "mil-paint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Renders Blitz paint commands into a terminal cell surface"
+
+[dependencies]
+anyhow = { workspace = true }
+anyrender = "=0.6.2"
+kurbo = "0.12"
+peniko = "0.5"
+tracing = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }

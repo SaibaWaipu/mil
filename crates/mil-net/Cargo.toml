@@ -1,0 +1,35 @@
+[package]
+name = "mil-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Async HTTP, cookies and response cache for the mil terminal browser"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+indexmap = { workspace = true }
+tracing = { workspace = true }
+
+# `cookie_store` 0.22.x depends on `cookie` ^0.18 *internally*, not on the
+# workspace's `cookie = "0.22"`. This crate therefore deliberately does NOT
+# depend on `cookie` directly: it uses `CookieStore::parse` and
+# `cookie_store::serde::json` instead, so there is no duplicate/ incompatible
+# cookie type in the graph. Reqwest's `cookies` feature stays disabled.
+#
+# Pin 0.22.0 exactly: 0.22.1 raised its MSRV to 1.88 while this workspace
+# targets Rust 1.86. Both versions have the same API used here.
+cookie_store = "=0.22.0"
+
+[dev-dependencies]
+tokio = { workspace = true }

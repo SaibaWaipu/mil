@@ -1,0 +1,17 @@
+[package]
+name = "mil-js"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.87"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optional partial JavaScript support for mil"
+
+[dependencies]
+anyhow = { workspace = true }
+blitz-dom = { version = "=0.2.4", default-features = false, features = ["system_fonts"] }
+blitz-html = "=0.2.0"
+rquickjs = { version = "=0.14.0", features = ["properties"] }
+tracing = { workspace = true }
+url = { workspace = true }

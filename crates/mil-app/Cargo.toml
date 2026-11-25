@@ -1,0 +1,30 @@
+[package]
+name = "mil"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A fast, minimal terminal web browser"
+
+[[bin]]
+name = "mil"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+blitz-traits = "=0.2.0"
+mil-dom = { path = "../mil-dom" }
+mil-js = { path = "../mil-js" }
+mil-net = { path = "../mil-net" }
+mil-paint = { path = "../mil-paint" }
+mil-session = { path = "../mil-session" }
+mil-tui = { path = "../mil-tui" }

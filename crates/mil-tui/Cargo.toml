@@ -1,0 +1,21 @@
+[package]
+name = "mil-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Terminal UI compositor for the mil browser"
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+image.workspace = true
+mil-paint = { path = "../mil-paint" }
+ratatui.workspace = true
+# The workspace pins `default-features = false` (no libchafa); enable only the
+# crossterm backend feature, which is required by `Picker::from_query_stdio`.
+ratatui-image = { workspace = true, features = ["crossterm"] }
+unicode-width.workspace = true
