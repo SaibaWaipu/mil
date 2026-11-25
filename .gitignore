@@ -2,6 +2,10 @@
 /target/
 **/target/
 
+# Python bytecode (end-to-end test harness)
+__pycache__/
+*.pyc
+
 # Note: Cargo.lock is intentionally COMMITTED (binary project).
 !/Cargo.lock
 
