@@ -664,7 +664,10 @@ impl App {
                     // characters typed into the omnibox and its Enter key.
                     let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
                     let _ = self.view.handle_event(esc, false, &self.config.keybindings);
-                    url_input = self.active_tab().url.to_string();
+                    // Start a fresh prompt so typing replaces the URL instead
+                    // of appending to it (equivalent to select-all in a GUI
+                    // browser's address bar).
+                    url_input.clear();
                     editing_url = true;
                 }
                 Some(Action::BlurUrl) => {

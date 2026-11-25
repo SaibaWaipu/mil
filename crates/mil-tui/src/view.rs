@@ -70,7 +70,23 @@ impl TerminalView {
     /// example in a CI runner), this falls back to ratatui-image's halfblocks
     /// protocol and [`image_support`](Self::image_support) returns `false`.
     pub fn new() -> anyhow::Result<Self> {
-        let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+        // `MIL_IMAGE_PROTOCOL=none` (or `halfblocks`) skips the terminal
+        // capability probe. Some terminals never answer those queries; the
+        // probe's reader thread then lingers and can swallow subsequent
+        // keystrokes. This is also useful for headless/CI runs.
+        let skip_probe = std::env::var("MIL_IMAGE_PROTOCOL")
+            .map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "none" | "off" | "halfblocks"
+                )
+            })
+            .unwrap_or(false);
+        let picker = if skip_probe {
+            Picker::halfblocks()
+        } else {
+            Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
+        };
         Ok(Self {
             picker,
             protocols: HashMap::new(),

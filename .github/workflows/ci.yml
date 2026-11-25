@@ -44,6 +44,21 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+  e2e:
+    name: End-to-end (PTY)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build mil
+        run: cargo build --bin mil
+      - name: Run PTY end-to-end tests
+        run: python3 scripts/e2e.py target/debug/mil
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -4,7 +4,7 @@
 
 `mil` (pronounced "mill") is a keyboard-first web browser that runs entirely in your terminal. It uses the Blitz HTML/CSS engine to parse and lay out pages, then lowers the result into a terminal cell grid with `mil-paint` and ratatui. It is designed to feel like a native Unix command: `mil [URL]`, with sane defaults and no graphical desktop required.
 
-**Status:** the core browser is implemented and verified in this repository. All 98 workspace tests pass, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all -- --check` are clean, and local HTTP smoke tests confirmed both page rendering and JavaScript mutations. There is no published crates.io release yet. Below, ✅ means implemented in this tree; 🚧 means partial, not yet usable end-to-end, or planned. See [Status and roadmap](#status-and-roadmap).
+**Status:** the core browser is implemented and verified in this repository. All 103 workspace tests pass, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all -- --check` are clean, and 14 end-to-end tests drive the real binary through a PTY against a local HTTP server. There is no published crates.io release yet. Below, ✅ means implemented in this tree; 🚧 means partial, not yet usable end-to-end, or planned. See [Status and roadmap](#status-and-roadmap).
 
 ## Why it exists
 
@@ -55,6 +55,7 @@ cargo install --path crates/mil-app
 ```
 
 This installs the `mil` binary. A recent stable Rust toolchain is required; see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup. To run without installing:
+
 
 ```sh
 cargo run -p mil -- https://example.com
@@ -130,6 +131,17 @@ JavaScript is **off by default**; enable it with `[javascript] enabled = true` (
 - **Binary size.** Much smaller than Chromium, but Stylo, Taffy and Parley are linked in.
 - **Not a general-purpose browser.** No extensions, PDFs, DRM, WebGL, video playback, service workers or media playback. Windows support is best-effort.
 - **Work in progress.** Find highlighting, a full help screen, link focus rings, end-to-end form submission, scripted image policy overrides, benchmark results and per-OS release smoke tests are still open.
+
+## Testing
+
+Unit and integration tests run with `cargo test --workspace`. The end-to-end suite starts `mil` on a real pseudo-terminal, serves fixture pages from a local HTTP server, and asserts against a small ANSI screen model — so it checks what a human would actually see, including key handling, scrolling, link activation, tabs, JS mutations, find, bookmarks and session restore:
+
+```sh
+cargo build --bin mil
+python3 scripts/e2e.py target/debug/mil
+```
+
+The suite uses only the Python standard library and runs in CI. Set `MIL_IMAGE_PROTOCOL=none` to skip terminal graphics capability probes in headless environments.
 
 ## Status and roadmap
 
