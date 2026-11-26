@@ -6,10 +6,14 @@ test, **[~]** partially implemented (the stated limitation is intentional or
 still open), **[ ]** not implemented. A phase is "substantially implemented"
 when its core path works end to end, even if individual criteria remain open.
 
-Verification for this revision: 98 workspace tests pass, `cargo clippy
---workspace --all-targets -- -D warnings` and `cargo fmt --all -- --check` are
-clean, and local HTTP smoke tests confirmed page rendering and JavaScript
-mutations. There is no published crates.io release yet.
+Verification for this revision: 133 workspace unit/integration tests (mil 13,
+mil-cdp 28, mil-dom 10, mil-js 14, mil-net 17, mil-paint 8, mil-session 15,
+mil-tui 28), one ignored real-browser integration test in `mil-cdp`, and 18 PTY
+end-to-end scenarios. `cargo clippy --workspace --all-targets -- -D warnings`
+and `cargo fmt --all -- --check` are clean, and local HTTP smoke tests confirmed
+page rendering and JavaScript mutations. The optional CDP backend was exercised
+with real JavaScript on public sites; there is no published crates.io release
+yet.
 
 ## P0 — Scaffold and spike — `substantially implemented`
 
@@ -18,9 +22,10 @@ terminal lifecycle.
 
 Acceptance criteria:
 
-- [x] Cargo workspace with all seven crates (`mil-app`, `mil-net`, `mil-dom`,
-      `mil-paint`, `mil-tui`, `mil-js`, `mil-session`) and a `mil` binary builds
-      on stable Rust.
+- [x] Cargo workspace with the seven default-browser crates (`mil-app`,
+      `mil-net`, `mil-dom`, `mil-paint`, `mil-tui`, `mil-js`, `mil-session`) plus
+      the optional `mil-cdp` backend — eight crates total — and a `mil` binary
+      builds on stable Rust.
 - [~] **Rendering spike:** a static HTML/CSS fixture is parsed by `blitz-html`,
       resolved to a `BaseDocument`, lowered through `mil-paint` into a cell
       grid, and printed with correct text, colours and basic block layout.
@@ -89,9 +94,10 @@ Acceptance criteria:
 - [x] `mil-session` tests cover a snapshot round-trip with two tabs at distinct
       scroll positions, plus non-finite scroll sanitization.
 
-## P3 — JavaScript via rquickjs — `implemented, partial by design`
+## P3 — JavaScript via rquickjs — `implemented, partial by design (Blitz); full JS via optional CDP`
 
-Add opt-in scripting with a deliberately small DOM/BOM surface.
+Add opt-in scripting with a deliberately small DOM/BOM surface, and provide an
+escape hatch for pages that need real JavaScript.
 
 Acceptance criteria:
 
@@ -120,7 +126,18 @@ Acceptance criteria:
 - [x] Non-goals are documented in `mil-js`: no Node APIs, external modules,
       arbitrary file access, promises, XHR, `localStorage`,
       `requestAnimationFrame`, complex selectors, workers, WASM or event
-      dispatch beyond `click()`. SPAs are expected to fail.
+      dispatch beyond `click()`. SPAs are expected to fail **in Blitz mode**.
+- [x] **The full-JavaScript gap is addressed by the optional CDP backend**
+      (`mil-cdp`, chromiumoxide 0.9.1). Chrome does fetching, scripting and
+      layout; a JS walker measures text/images with `getBoundingClientRect()`
+      and `getComputedStyle()` and `mil-cdp` paints them into the same
+      `mil_paint::Surface` and TUI. `--chrome PATH` and `MIL_CHROME` select the
+      executable; `--no-js` and `[javascript] enabled` are Blitz-only.
+- [~] CDP trade-offs are intentional, not planned away: ~100–300 MiB per browser
+      instance, an external binary, DOM snapshots re-read via `snapshot()`
+      instead of a live mirror, one engine serving all tabs, and UI shortcuts
+      that can leak into the page. Bing/Wikipedia/HN/GitHub render with full JS;
+      Google still serves a `/sorry/index` bot challenge from datacenter IPs.
 
 ## P4 — Forms and login — `library-level support, partial by design`
 
@@ -192,12 +209,21 @@ Acceptance criteria:
 
 - Not a full browser engine: no WebGL, service workers, WebSockets, web
   notifications, geolocation, media playback, extensions, PDFs or DRM.
-- JavaScript is a deliberately minimal, opt-in facade — not Node.js and not a
-  complete ECMAScript/DOM implementation. Modern SPA frameworks are expected to
-  fail.
+- In Blitz mode, JavaScript is a deliberately minimal, opt-in facade — not
+  Node.js and not a complete ECMAScript/DOM implementation. Modern SPA
+  frameworks are expected to fail there; the optional CDP backend runs the
+  page's real JavaScript instead.
+- **No bundled browser.** The CDP backend is optional and never ships a
+  Chromium binary: users must install `chrome-headless-shell` (or point at a
+  compatible Chromium) themselves. Blitz stays the lightweight, self-contained
+  default.
+- **No bot-challenge or CAPTCHA bypass.** Google Search from a datacenter IP
+  returns `/sorry/index` even with full JavaScript in CDP mode. That is
+  anti-bot detection, not a renderer gap, and defeating it is out of scope.
 - No sandbox isolation beyond process-level privileges; do not browse
-  untrusted sites with sensitive credentials. The JS memory limit and timer
-  budget are robustness measures, not a security boundary.
+  untrusted sites with sensitive credentials. The Blitz JS memory limit and
+  timer budget are robustness measures, not a security boundary; CDP launches
+  Chrome with `--no-sandbox` and does not add a security boundary either.
 - Terminal rendering is inherently limited: absolute positioning, precise
   fonts, sub-cell precision and pixel-perfect CSS are out of scope. Text
   fidelity depends on terminal capabilities.

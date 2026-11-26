@@ -7,8 +7,9 @@ use std::{io, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use blitz_traits::shell::{ColorScheme, Viewport};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use mil_cdp::{CdpConfig, CdpEngine, CdpLink, CdpPage};
 use mil_dom::{LinkRegion, Page, PaintConfig, render_page};
 use mil_js::{JsDomMirror, JsEngine};
 use mil_net::{Client, NetConfig};
@@ -24,6 +25,17 @@ const CELL_HEIGHT_PX: u32 = 16;
 /// Upper bound on painted rows for one document, so a pathological page cannot
 /// make the cell grid consume unbounded memory.
 const MAX_SURFACE_ROWS: u16 = 1024;
+
+/// Rendering backend. Blitz is the self-contained default; CDP drives an
+/// external headless Chrome for sites that need real JavaScript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+enum EngineMode {
+    /// Built-in Blitz layout engine (limited JavaScript support).
+    #[default]
+    Blitz,
+    /// Chrome DevTools Protocol backend (full JavaScript support).
+    Cdp,
+}
 
 /// A fast, minimal terminal web browser.
 #[derive(Debug, Parser)]
@@ -44,6 +56,14 @@ struct Args {
     /// Disable JavaScript even if enabled in the config
     #[arg(long)]
     no_js: bool,
+
+    /// Rendering engine to use
+    #[arg(long, value_enum, default_value_t = EngineMode::Blitz)]
+    engine: EngineMode,
+
+    /// Path to the headless Chrome shell used by the CDP engine
+    #[arg(long, value_name = "PATH")]
+    chrome: Option<PathBuf>,
 
     /// Increase logging verbosity (repeatable)
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -96,6 +116,33 @@ async fn main() -> Result<()> {
         return Err(err).context("re-enabling raw mode after terminal probe");
     }
 
+    // Start the browser only after the terminal is in raw mode, so a missing
+    // Chrome binary (or a failed handshake) produces a visible error instead
+    // of leaving a half-initialised TUI behind.
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let cdp = if args.engine == EngineMode::Cdp {
+        let config = CdpConfig {
+            executable: args.chrome.clone(),
+            ..CdpConfig::default()
+        };
+        match CdpEngine::new(config).await {
+            Ok(mut engine) => {
+                if let Err(err) = engine.set_viewport(cols, rows).await {
+                    let _ = engine.close().await;
+                    ratatui::restore();
+                    return Err(err).context("setting CDP viewport");
+                }
+                Some(engine)
+            }
+            Err(err) => {
+                ratatui::restore();
+                return Err(err).context("initialising CDP engine");
+            }
+        }
+    } else {
+        None
+    };
+
     let mut app = App {
         config,
         client,
@@ -105,6 +152,8 @@ async fn main() -> Result<()> {
         bookmarks,
         restore_session: !args.no_session,
         focused_link: 0,
+        engine_mode: args.engine,
+        cdp,
     };
 
     let result = async {
@@ -122,8 +171,14 @@ async fn main() -> Result<()> {
     }
     .await;
 
-    // Cleanup must run on every exit path. In particular, a failure to disable
-    // mouse capture must not skip leaving raw mode / the alternate screen.
+    // Cleanup must run on every exit path. In particular, a failure to close
+    // the browser or disable mouse capture must not skip leaving raw mode /
+    // the alternate screen.
+    if let Some(cdp) = app.cdp.as_mut() {
+        if let Err(err) = cdp.close().await {
+            warn!("could not close CDP engine: {err:#}");
+        }
+    }
     if let Err(err) = disable_mouse_capture() {
         warn!("could not disable mouse capture: {err:#}");
     }
@@ -143,7 +198,8 @@ fn init_logging(verbosity: u8) {
         2 => "debug",
         _ => "trace",
     };
-    let filter = format!("mil={level},mil_tui={level},mil_net={level},mil_dom={level}");
+    let filter =
+        format!("mil={level},mil_tui={level},mil_net={level},mil_dom={level},mil_cdp={level}");
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(io::stderr)
@@ -267,6 +323,33 @@ fn find_row(page: &Page, query: &str) -> Option<f64> {
     })
 }
 
+/// Case-insensitive search over a painted surface, used when there is no Blitz
+/// `Page` to walk (CDP pages are painted by the engine's JS snapshotter).
+fn find_row_in_surface(surface: &Surface, query: &str) -> Option<f64> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+    (0..surface.height).find_map(|row| {
+        let text: String = (0..surface.width)
+            .filter_map(|col| surface.get(col, row))
+            .filter(|cell| !cell.continuation)
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+        text.to_lowercase()
+            .contains(&needle)
+            .then(|| f64::from(row))
+    })
+}
+
+/// Hit-test a CDP link using the document pixel coordinates reported by the
+/// engine's JS walker.
+fn cdp_link_at(links: &[CdpLink], x: f64, y: f64) -> Option<&CdpLink> {
+    links
+        .iter()
+        .find(|link| x >= link.x && x <= link.x + link.w && y >= link.y && y <= link.y + link.h)
+}
+
 /// Number of painted rows needed to hold the document's content.
 ///
 /// `render_page` writes into a surface of exactly the height it is given, so
@@ -288,6 +371,35 @@ fn surface_rows(page: &Page, viewport_rows: u16) -> u16 {
     needed.clamp(u32::from(rows), cap) as u16
 }
 
+/// Engine-independent result of loading a page, ready to install in a tab.
+struct LoadedPage {
+    url: Url,
+    title: String,
+    /// Present only for Blitz pages; CDP pages have no Blitz document.
+    page: Option<Page>,
+    surface: Surface,
+    links: Vec<CdpLink>,
+}
+
+impl From<CdpPage> for LoadedPage {
+    fn from(page: CdpPage) -> Self {
+        let CdpPage {
+            url,
+            title,
+            surface,
+            links,
+            ..
+        } = page;
+        Self {
+            url,
+            title,
+            page: None,
+            surface,
+            links,
+        }
+    }
+}
+
 struct Tab {
     url: Url,
     title: String,
@@ -295,6 +407,9 @@ struct Tab {
     forward: Vec<Url>,
     page: Option<Page>,
     surface: Option<Surface>,
+    /// Links collected by the CDP JS walker. `Page::links()` is unavailable
+    /// for CDP pages, so hit-testing uses these document-pixel rectangles.
+    cdp_links: Vec<CdpLink>,
     scroll_y: f64,
     scroll_max_y: f64,
     /// Last navigation failure, shown in the status line until the next load.
@@ -310,6 +425,7 @@ impl Tab {
             forward: Vec::new(),
             page: None,
             surface: None,
+            cdp_links: Vec::new(),
             scroll_y: 0.0,
             scroll_max_y: 0.0,
             error: None,
@@ -360,9 +476,20 @@ struct App {
     restore_session: bool,
     /// Index of the link that Enter will activate.
     focused_link: usize,
+    engine_mode: EngineMode,
+    /// Present only in CDP mode; a single engine drives the active tab.
+    cdp: Option<CdpEngine>,
 }
 
 impl App {
+    fn is_cdp(&self) -> bool {
+        self.engine_mode == EngineMode::Cdp
+    }
+
+    fn cdp_engine(&mut self) -> Result<&mut CdpEngine> {
+        self.cdp.as_mut().context("CDP engine is not running")
+    }
+
     async fn bootstrap(&mut self) -> Result<()> {
         if self.restore_session {
             match Session::load() {
@@ -421,7 +548,9 @@ impl App {
         if let Some(error) = &self.active_tab().error {
             return format!("Error: {error}");
         }
-        if self.config.javascript.enabled {
+        if self.is_cdp() {
+            "JS: full (CDP)  |  ? help".to_owned()
+        } else if self.config.javascript.enabled {
             "JS: partial  |  ? help".to_owned()
         } else {
             "JS: off  |  ? help".to_owned()
@@ -444,6 +573,9 @@ impl App {
     }
 
     async fn load(&mut self, url: Url, record_history: bool) -> Result<()> {
+        if self.is_cdp() {
+            return self.load_cdp(url, record_history).await;
+        }
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         let (final_url, body) = if url.scheme() == "file" {
             // reqwest cannot fetch file URLs; read them locally so the URLs
@@ -489,6 +621,31 @@ impl App {
         let config = PaintConfig::default();
         let surface = render_page(&page, &config, cols, surface_rows(&page, rows))
             .with_context(|| format!("painting {}", final_url))?;
+        self.install_page(
+            LoadedPage {
+                url: final_url,
+                title,
+                page: Some(page),
+                surface,
+                links: Vec::new(),
+            },
+            record_history,
+            rows,
+        );
+        Ok(())
+    }
+
+    /// Apply a freshly painted page to the active tab. Both engines share the
+    /// history, title, scroll and "no readable content" handling so switching
+    /// `--engine` does not change the visible browser behaviour.
+    fn install_page(&mut self, loaded: LoadedPage, record_history: bool, rows: u16) {
+        let LoadedPage {
+            url: final_url,
+            title,
+            page,
+            surface,
+            links: cdp_links,
+        } = loaded;
         // The tab bar is only drawn with more than one tab; the URL and status
         // rows are always present.
         let chrome = if self.tabs.len() > 1 { 3 } else { 2 };
@@ -516,13 +673,51 @@ impl App {
         } else {
             title
         };
-        tab.page = Some(page);
+        tab.page = page;
         tab.surface = Some(surface);
+        tab.cdp_links = cdp_links;
         tab.scroll_y = 0.0;
         tab.scroll_max_y = scroll_max_y.max(0.0);
         tab.error = notice;
         self.focused_link = 0;
+    }
+
+    /// CDP counterpart of `load`: the engine fetches, runs scripts and paints
+    /// the page; the Blitz JS façade is deliberately not invoked here.
+    async fn load_cdp(&mut self, url: Url, record_history: bool) -> Result<()> {
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        debug!("cdp navigate {url}");
+        let page = self.cdp_engine()?.navigate(&url, cols, rows).await?;
+        self.install_page(page.into(), record_history, rows);
         Ok(())
+    }
+
+    /// Re-read the CDP engine's current page after an interaction. Using
+    /// `snapshot` rather than `reload` keeps in-page state (form values,
+    /// application state) intact.
+    async fn cdp_refresh_current(&mut self, record_history: bool) -> Result<()> {
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let page = self.cdp_engine()?.snapshot(cols, rows).await?;
+        self.install_page(page.into(), record_history, rows);
+        Ok(())
+    }
+
+    /// Dispatch a click on a recorded CDP link, then resynchronise the painted
+    /// surface with whatever page the click landed on.
+    async fn cdp_follow_link(&mut self, link: CdpLink) -> Result<()> {
+        let x = link.x + link.w / 2.0;
+        let y = link.y + link.h / 2.0;
+        self.cdp_engine()?.click(x, y).await?;
+        // Give the in-page navigation a moment to commit before reloading.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        self.cdp_refresh_current(true).await
+    }
+
+    /// Set an error on the active tab without terminating the browser.
+    fn record_navigation_error(&mut self, err: &anyhow::Error) {
+        warn!("CDP navigation failed: {err:#}");
+        let message = format!("{err:#}").replace('\n', " ");
+        self.active_tab_mut().error = Some(message.chars().take(160).collect());
     }
 
     /// Fetch linked author stylesheets and attach them to their `<link>`
@@ -617,26 +812,60 @@ impl App {
         }
     }
 
-    fn navigate_history(&mut self, backwards: bool) -> Result<bool> {
+    /// Update the tab's history stacks and return the URL to visit.
+    fn history_target(&mut self, backwards: bool) -> Option<Url> {
         let tab = self.active_tab_mut();
-        let to = if backwards {
+        if backwards {
             if tab.back.is_empty() {
-                return Ok(false);
+                return None;
             }
             let next = tab.back.pop().expect("checked non-empty");
             let current = tab.url.clone();
             tab.forward.push(current);
-            next
+            Some(next)
         } else {
             if tab.forward.is_empty() {
-                return Ok(false);
+                return None;
             }
             let next = tab.forward.pop().expect("checked non-empty");
             let current = tab.url.clone();
             tab.back.push(current);
-            next
+            Some(next)
+        }
+    }
+
+    /// History navigation through the active engine. Blitz keeps its original
+    /// "clear then refetch" path; CDP asks the browser to go back/forward and
+    /// reports failures in the status line without exiting.
+    async fn history_move(&mut self, backwards: bool) -> Result<bool> {
+        let Some(to) = self.history_target(backwards) else {
+            return Ok(false);
         };
         debug!("history: {} -> {}", self.active_tab().url, to);
+        if self.is_cdp() {
+            let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+            let result = if backwards {
+                self.cdp_engine()?.back(cols, rows).await
+            } else {
+                self.cdp_engine()?.forward(cols, rows).await
+            };
+            match result {
+                Ok(page) => self.install_page(page.into(), false, rows),
+                Err(err) => {
+                    // Undo the bookkeeping so a retry targets the same entry.
+                    let tab = self.active_tab_mut();
+                    if backwards {
+                        tab.forward.pop();
+                        tab.back.push(to);
+                    } else {
+                        tab.back.pop();
+                        tab.forward.push(to);
+                    }
+                    self.record_navigation_error(&err);
+                }
+            }
+            return Ok(true);
+        }
         let tab = self.active_tab_mut();
         tab.url = to;
         tab.page = None;
@@ -644,6 +873,7 @@ impl App {
         tab.scroll_y = 0.0;
         tab.error = None;
         self.focused_link = 0;
+        self.restore_active().await?;
         Ok(true)
     }
 
@@ -659,6 +889,9 @@ impl App {
     }
 
     fn link_count(&self) -> usize {
+        if self.is_cdp() {
+            return self.active_tab().cdp_links.len();
+        }
         self.active_tab()
             .page
             .as_ref()
@@ -667,7 +900,12 @@ impl App {
 
     /// Scroll to the first text run containing `query`.
     fn find_text(&mut self, query: &str) {
-        let row = {
+        let row = if self.is_cdp() {
+            let Some(surface) = self.active_tab().surface.as_ref() else {
+                return;
+            };
+            find_row_in_surface(surface, query)
+        } else {
             let Some(page) = self.active_tab().page.as_ref() else {
                 return;
             };
@@ -675,6 +913,24 @@ impl App {
         };
         if let Some(row) = row {
             clamp_scroll(self.active_tab_mut(), row);
+        }
+    }
+
+    /// Scroll the painted (full-document) surface and keep the CDP page's own
+    /// scroll offset in sync with a pixel hint. `cdp.scroll` is advisory: the
+    /// surface is a static snapshot, so scrolling never re-renders or reloads.
+    async fn scroll_to(&mut self, target: f64) {
+        let previous = self.active_tab().scroll_y;
+        let tab = self.active_tab_mut();
+        clamp_scroll(tab, target);
+        let applied_rows = tab.scroll_y - previous;
+        if self.is_cdp() && applied_rows != 0.0 {
+            let px = applied_rows * f64::from(CELL_HEIGHT_PX);
+            if let Some(cdp) = self.cdp.as_mut() {
+                if let Err(err) = cdp.scroll(px).await {
+                    warn!("could not send CDP scroll hint: {err:#}");
+                }
+            }
         }
     }
 
@@ -699,7 +955,9 @@ impl App {
                     editing_url,
                     status: &status,
                     title: &tab.title,
-                    loading: tab.page.is_none(),
+                    // CDP pages deliberately have no Blitz `Page`, so the
+                    // spinner must track the painted surface instead.
+                    loading: tab.surface.is_none(),
                     surface: tab.surface.as_ref(),
                     scroll_y: tab.scroll_y,
                     scroll_max_y: tab.scroll_max_y,
@@ -711,6 +969,36 @@ impl App {
                 continue;
             }
             let ev = event::read()?;
+            // In CDP mode the page receives raw input so it can run its own
+            // key handlers. Text entered while the omnibox owns input must not
+            // leak into the page. Mouse clicks and wheels are excluded here:
+            // the view turns them into `Action`s, which are dispatched to CDP
+            // below as precise document-pixel clicks / scroll hints.
+            //
+            // Caveat: UI shortcuts (Ctrl-L, Ctrl-T, q, r, …) and find-prompt
+            // typing also reach the page: the view's keybinding map and its
+            // find state are private, so the app cannot tell which events the
+            // TUI consumed. `CdpEngine::key_event` filters the worst cases
+            // (Ctrl-L/C/Q, Esc), but this only loosely mirrors a real browser.
+            if self.is_cdp() && !editing_url {
+                let ui_mouse = matches!(
+                    &ev,
+                    Event::Mouse(mouse)
+                        if matches!(
+                            mouse.kind,
+                            event::MouseEventKind::Down(event::MouseButton::Left)
+                                | event::MouseEventKind::ScrollUp
+                                | event::MouseEventKind::ScrollDown
+                        )
+                );
+                if !ui_mouse {
+                    if let Some(cdp) = self.cdp.as_mut() {
+                        if let Err(err) = cdp.key_event(&ev).await {
+                            warn!("could not forward event to CDP page: {err:#}");
+                        }
+                    }
+                }
+            }
             // The view owns all text state (omnibox, find prompt and paste).
             // Editing text here as well would swallow keybindings such as
             // Ctrl-C and Ctrl-W while the omnibox is focused.
@@ -779,33 +1067,37 @@ impl App {
                     self.restore_active().await?;
                 }
                 Some(Action::Reload) => {
-                    let url = self.active_tab().url.clone();
-                    self.navigate(url, false).await?;
+                    if self.is_cdp() {
+                        // Failures stay on the page as an error message.
+                        if let Err(err) = self.cdp_refresh_current(false).await {
+                            self.record_navigation_error(&err);
+                        }
+                    } else {
+                        let url = self.active_tab().url.clone();
+                        self.navigate(url, false).await?;
+                    }
                     url_input = self.active_tab().url.to_string();
                 }
                 Some(Action::Back) => {
-                    if self.navigate_history(true)? {
-                        self.restore_active().await?;
+                    if self.history_move(true).await? {
                         editing_url = false;
                         url_input = self.active_tab().url.to_string();
                     }
                 }
                 Some(Action::Forward) => {
-                    if self.navigate_history(false)? {
-                        self.restore_active().await?;
+                    if self.history_move(false).await? {
                         editing_url = false;
                         url_input = self.active_tab().url.to_string();
                     }
                 }
                 Some(Action::Scroll(delta)) => {
-                    let tab = self.active_tab_mut();
-                    let next = tab.scroll_y + f64::from(delta);
-                    clamp_scroll(tab, next);
+                    let next = self.active_tab().scroll_y + f64::from(delta);
+                    self.scroll_to(next).await;
                 }
-                Some(Action::ScrollToTop) => clamp_scroll(self.active_tab_mut(), 0.0),
+                Some(Action::ScrollToTop) => self.scroll_to(0.0).await,
                 Some(Action::ScrollToBottom) => {
                     let max = self.active_tab().scroll_max_y;
-                    clamp_scroll(self.active_tab_mut(), max);
+                    self.scroll_to(max).await;
                 }
                 Some(Action::Click(col, row)) => {
                     self.follow_link_at(col, row).await?;
@@ -851,6 +1143,27 @@ impl App {
     }
 
     async fn follow_link_at(&mut self, col: u16, row: u16) -> Result<bool> {
+        if self.is_cdp() {
+            // `Action::Click` rows are document-relative: `TerminalView` has
+            // already added its scroll offset, so adding `scroll_y` again
+            // would double-count it here.
+            let x = (f64::from(col) + 0.5) * f64::from(CELL_WIDTH_PX);
+            let y = (f64::from(row) + 0.5) * f64::from(CELL_HEIGHT_PX);
+            let link = cdp_link_at(&self.active_tab().cdp_links, x, y).cloned();
+            match link {
+                Some(link) => {
+                    if let Err(err) = self.cdp_follow_link(link).await {
+                        self.record_navigation_error(&err);
+                    }
+                }
+                None => {
+                    if let Err(err) = self.cdp_engine()?.click(x, y).await {
+                        warn!("could not send CDP click: {err:#}");
+                    }
+                }
+            }
+            return Ok(true);
+        }
         let links = {
             let Some(page) = self.active_tab().page.as_ref() else {
                 return Ok(false);
@@ -865,6 +1178,19 @@ impl App {
     }
 
     async fn follow_focused_link(&mut self) -> Result<bool> {
+        if self.is_cdp() {
+            let len = self.active_tab().cdp_links.len();
+            let index = self.focused_link.min(len.saturating_sub(1));
+            let Some(link) = self.active_tab().cdp_links.get(index).cloned() else {
+                return Ok(false);
+            };
+            // Use the centre of the link's document-pixel rectangle so the
+            // real page receives a reliable hit on the anchor.
+            if let Err(err) = self.cdp_follow_link(link).await {
+                self.record_navigation_error(&err);
+            }
+            return Ok(true);
+        }
         let links = {
             let Some(page) = self.active_tab().page.as_ref() else {
                 return Ok(false);
@@ -1004,5 +1330,69 @@ mod tests {
         assert_eq!(tab.scroll_y, 5.0);
         clamp_scroll(&mut tab, f64::NEG_INFINITY);
         assert_eq!(tab.scroll_y, 0.0);
+    }
+
+    #[test]
+    fn engine_and_chrome_flags_parse() {
+        let args = Args::try_parse_from([
+            "mil",
+            "--engine",
+            "cdp",
+            "--chrome",
+            "/opt/chrome-headless-shell",
+            "https://example.org",
+        ])
+        .expect("parse CDP flags");
+        assert_eq!(args.engine, EngineMode::Cdp);
+        assert_eq!(
+            args.chrome,
+            Some(PathBuf::from("/opt/chrome-headless-shell"))
+        );
+        assert_eq!(args.url.as_deref(), Some("https://example.org"));
+
+        let default = Args::try_parse_from(["mil"]).expect("parse defaults");
+        assert_eq!(default.engine, EngineMode::Blitz);
+        assert!(default.chrome.is_none());
+        assert!(Args::try_parse_from(["mil", "--engine", "firefox"]).is_err());
+        assert_eq!(
+            EngineMode::from_str("CDP", true).expect("case-insensitive"),
+            EngineMode::Cdp
+        );
+    }
+
+    #[test]
+    fn cdp_links_hit_test_in_document_pixels() {
+        let link = CdpLink {
+            x: 8.0,
+            y: 32.0,
+            w: 40.0,
+            h: 16.0,
+            url: "https://example.org/".to_owned(),
+        };
+        let links = std::slice::from_ref(&link);
+        // A click at cell (1, 2) maps to (12, 40) document pixels.
+        assert!(cdp_link_at(links, 12.0, 40.0).is_some());
+        assert!(cdp_link_at(links, 12.0, 16.0).is_none());
+        assert!(cdp_link_at(links, 100.0, 40.0).is_none());
+        assert_eq!(link.x + link.w / 2.0, 28.0);
+    }
+
+    #[test]
+    fn cdp_surface_finds_text_by_row() {
+        // Click rows from the view are already document-relative, so a find
+        // result in the full-document surface can be used as `scroll_y` as-is.
+        let mut surface = Surface::new(16, 4);
+        for (col, ch) in "hello world".chars().enumerate() {
+            surface.set(
+                col as u16,
+                2,
+                mil_paint::Cell {
+                    symbol: ch.to_string(),
+                    ..mil_paint::Cell::blank()
+                },
+            );
+        }
+        assert_eq!(find_row_in_surface(&surface, "WORLD"), Some(2.0));
+        assert_eq!(find_row_in_surface(&surface, "nope"), None);
     }
 }

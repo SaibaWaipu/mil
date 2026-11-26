@@ -16,6 +16,7 @@ import http.server
 import os
 import pty
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -30,6 +31,53 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PAGES = ROOT / "tests" / "e2e" / "pages"
 ROWS, COLS = 30, 100
+
+# chrome-headless-shell is optional: CI may not have it installed. Puppeteer
+# keeps a cached copy at a versioned path, which is where local developers
+# usually get it from; `MIL_CHROME` and PATH are checked first.
+CHROME_CACHE = Path.home() / ".cache" / "puppeteer" / "chrome-headless-shell"
+CHROME_KNOWN = (
+    CHROME_CACHE
+    / "linux-155.0.8059.79"
+    / "chrome-headless-shell-linux64"
+    / "chrome-headless-shell"
+)
+
+
+def find_chrome() -> tuple[str | None, str]:
+    """Return (executable, reason) for the optional CDP backend."""
+    override = os.environ.get("MIL_CHROME")
+    if override:
+        if Path(override).is_file():
+            return override, ""
+        return None, f"MIL_CHROME={override} does not exist"
+    on_path = shutil.which("chrome-headless-shell")
+    if on_path:
+        return on_path, ""
+    if CHROME_KNOWN.is_file():
+        return str(CHROME_KNOWN), ""
+    for candidate in sorted(
+        CHROME_CACHE.glob("*/chrome-headless-shell-linux64/chrome-headless-shell"),
+        reverse=True,
+    ):
+        return str(candidate), ""
+    return None, f"chrome-headless-shell not found on PATH or under {CHROME_CACHE}"
+
+
+def last_nonblank_line(text: str) -> str:
+    """The status bar is the last line the TUI paints with content."""
+    return next((line for line in reversed(text.splitlines()) if line.strip()), "")
+
+
+def click_on_text(b: "Browser", needle: str) -> None:
+    """Send an SGR mouse click at the first painted occurrence of `needle`."""
+    for row, line in enumerate(b.screen.text().splitlines()):
+        col = line.find(needle)
+        if col >= 0:
+            # SGR reports are 1-based; the TUI viewport also starts at column 1.
+            b.send(f"\x1b[<0;{col + 2};{row + 1}M")
+            return
+    raise AssertionError(f"could not find {needle!r} on screen to click")
 
 
 class Screen:
@@ -144,7 +192,14 @@ class Screen:
 
 
 class Browser:
-    def __init__(self, binary: str, args: list[str], config: Path, state_dir: Path) -> None:
+    def __init__(
+        self,
+        binary: str,
+        args: list[str],
+        config: Path,
+        state_dir: Path,
+        extra_env: dict[str, str] | None = None,
+    ) -> None:
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         env = os.environ.copy()
@@ -154,6 +209,8 @@ class Browser:
             MIL_IMAGE_PROTOCOL="none",
             XDG_STATE_HOME=str(state_dir),
         )
+        if extra_env:
+            env.update(extra_env)
         err_path = state_dir / "stderr.log"
         self.stderr = err_path.open("w")
         self.proc = subprocess.Popen(
@@ -249,11 +306,12 @@ def run(binary: str) -> None:
         state = tmp / "state"
         state.mkdir()
 
-        def launch(*args: str) -> Browser:
-            return Browser(binary, list(args), config, state)
+        def launch(*args: str, extra_env: dict[str, str] | None = None) -> Browser:
+            return Browser(binary, list(args), config, state, extra_env=extra_env)
 
         passed: list[str] = []
         failed: list[str] = []
+        skipped: list[str] = []
 
         def check(name: str, fn) -> None:
             try:
@@ -264,6 +322,10 @@ def run(binary: str) -> None:
             else:
                 passed.append(name)
                 print(f"PASS {name}")
+
+        def skip(name: str, reason: str) -> None:
+            skipped.append(name)
+            print(f"SKIP {name}: {reason}")
 
         # 1. basic rendering
         def basic() -> None:
@@ -501,8 +563,107 @@ def run(binary: str) -> None:
 
         check("multi-tab session restore", multi_tab_session)
 
+        # 15-18. Optional CDP backend. These are skipped, not failed, when no
+        # chrome-headless-shell is installed.
+        chrome, cdp_reason = find_chrome()
+        cdp_names = [
+            "cdp javascript executes in chrome",
+            "cdp link click navigation",
+            "cdp form input and button click",
+            "cdp back navigation",
+        ]
+        if chrome is None:
+            for name in cdp_names:
+                skip(name, cdp_reason)
+        else:
+            # Pin the discovered binary so a PATH-only or differently versioned
+            # installation is used by `mil` too.
+            cdp_env = {"MIL_CHROME": chrome}
+
+            def cdp_js() -> None:
+                b = launch(
+                    "--engine", "cdp", "--no-session", base + "/cdp.html",
+                    extra_env=cdp_env,
+                )
+                try:
+                    time.sleep(2.0)  # Chrome + CDP startup is slower than Blitz
+                    b.expect("JS RAN IN CHROME", timeout=15)
+                    b.expect("JS: full (CDP)", timeout=15)
+                    status = last_nonblank_line(b.screen.text())
+                    if "JS: full (CDP)" not in status:
+                        raise AssertionError(f"CDP status is not the last line: {status!r}")
+                    if "CDP READY" not in status:
+                        raise AssertionError(f"script did not set document.title: {status!r}")
+                finally:
+                    b.close()
+
+            check("cdp javascript executes in chrome", cdp_js)
+
+            def cdp_link_click() -> None:
+                b = launch(
+                    "--engine", "cdp", "--no-session", base + "/cdp_link.html",
+                    extra_env=cdp_env,
+                )
+                try:
+                    time.sleep(2.0)
+                    b.expect("CDP LINK", timeout=15)
+                    click_on_text(b, "CDP LINK")
+                    # CDP link clicks can take a moment to resync the screen.
+                    b.expect("SECOND PAGE", timeout=15)
+                finally:
+                    b.close()
+
+            check("cdp link click navigation", cdp_link_click)
+
+            def cdp_form() -> None:
+                b = launch(
+                    "--engine", "cdp", "--no-session", base + "/cdp_form.html",
+                    extra_env=cdp_env,
+                )
+                try:
+                    time.sleep(2.0)
+                    b.expect("FORM OUTPUT", timeout=15)
+                    # The fixture autofocuses its input, so typed characters
+                    # go straight into the page's <input>.
+                    b.type_text("hello")
+                    time.sleep(0.5)
+                    click_on_text(b, "SUBMIT")
+                    time.sleep(0.5)
+                    # A plain in-page click does not trigger a repaint in CDP
+                    # mode; `r` snapshots the live DOM without resetting the
+                    # form state (see App::cdp_refresh_current).
+                    b.send("r")
+                    b.expect("hello", timeout=15)
+                    if not any(line.strip() == "hello" for line in b.screen.text().splitlines()):
+                        raise AssertionError(
+                            "typed value did not reach the form output:\n" + b.screen.text()
+                        )
+                finally:
+                    b.close()
+
+            check("cdp form input and button click", cdp_form)
+
+            def cdp_back() -> None:
+                b = launch(
+                    "--engine", "cdp", "--no-session", base + "/cdp_link.html",
+                    extra_env=cdp_env,
+                )
+                try:
+                    time.sleep(2.0)
+                    b.expect("CDP LINK", timeout=15)
+                    click_on_text(b, "CDP LINK")
+                    b.expect("SECOND PAGE", timeout=15)
+                    b.send("\x1b[1;3D")  # Alt+Left
+                    b.expect("CDP LINK", timeout=15)
+                finally:
+                    b.close()
+
+            check("cdp back navigation", cdp_back)
+
     server.shutdown()
-    print(f"\n{len(passed)} passed, {len(failed)} failed")
+    print(f"\n{len(passed)} passed, {len(failed)} failed, {len(skipped)} skipped")
+    if skipped:
+        print("skipped:", ", ".join(skipped))
     if failed:
         print("failed:", ", ".join(failed))
         sys.exit(1)

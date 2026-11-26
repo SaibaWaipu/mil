@@ -34,8 +34,9 @@ Configuration is read from `~/.config/mil/config.toml`; runtime state is written
 | `mil-tui` | library | ratatui/crossterm widgets, keybindings, URL bar, tab bar, find bar, help screen |
 | `mil-js` | library | Optional, partial `rquickjs` integration; a small, explicit subset of DOM/BOM APIs |
 | `mil-session` | library | Session restore, history persistence, and bookmarks under the XDG state directory |
+| `mil-cdp` | library | Optional full-JS backend: drives `chrome-headless-shell` over CDP and produces a `mil_paint::Surface` |
 
-Keep dependencies pointing inward where possible: `mil-app` may depend on all crates, but library crates should avoid depending on each other unnecessarily. In particular, keep `mil-js` optional so the core build does not require a JavaScript engine.
+Keep dependencies pointing inward where possible: `mil-app` may depend on all crates, but library crates should avoid depending on each other unnecessarily. In particular, keep `mil-js` scoped to the lightweight Blitz path; it is deliberately partial. `mil-cdp` is the full-JavaScript path and requires an external `chrome-headless-shell` binary at runtime, so the default engine remains Blitz.
 
 ### Important: Blitz is pinned exactly
 

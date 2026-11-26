@@ -14,8 +14,21 @@ half-written config, session, or bookmarks file.
 | `MIL_CONFIG` | Use this file path directly. Relative paths are resolved against the current directory. |
 | `XDG_CONFIG_HOME` | Base directory for config lookup (default `~/.config`). Must be absolute; relative values are ignored with a warning. |
 | `XDG_STATE_HOME` | Base directory for mutable state (default `~/.local/state`). Must be absolute; relative values are ignored with a warning. |
-| `MIL_IMAGE_PROTOCOL` | Set to `none`, `off`, or `halfblocks` to skip terminal graphics capability probing (helpful in tmux/CI, where unanswered queries can swallow keystrokes). |
-| `MIL_LOAD_STYLESHEETS` | Set to `1`, `on`, `true`, or `yes` to fetch linked CSS. Off by default: some sites' hidden menus become visible because Blitz 0.2 lacks some selectors. |
+| `MIL_IMAGE_PROTOCOL` | Set to `none`, `off`, or `halfblocks` to skip terminal graphics capability probing (helpful in tmux/CI, where unanswered queries can swallow keystrokes). Applies to both engines. |
+| `MIL_LOAD_STYLESHEETS` | **Blitz only.** Set to `1`, `on`, `true`, or `yes` to fetch linked CSS. Off by default: some sites' hidden menus become visible because Blitz 0.2 lacks some selectors. Chrome loads stylesheets itself in CDP mode, so this has no effect there. |
+| `MIL_CHROME` | Path to the Chrome-compatible executable used by `--engine cdp`. `--chrome PATH` takes precedence; see [Rendering engine selection](#rendering-engine-selection). |
+
+## Rendering engine selection
+
+The engine is a CLI choice, not a `config.toml` key:
+
+| Flag | Effect |
+| --- | --- |
+| `--engine blitz` | Default, self-contained Blitz backend. `[javascript] enabled` and `--no-js` apply here. |
+| `--engine cdp` | Optional backend: full JavaScript in an external headless Chrome (`chromiumoxide` 0.9.1). `--no-js` has no effect and `[javascript] enabled` is ignored. |
+| `--chrome <PATH>` | Executable for CDP mode; highest precedence over `MIL_CHROME`. |
+
+Executable resolution order: `--chrome <PATH>` → `MIL_CHROME` (when set and non-empty) → well-known absolute Chrome/Chromium locations → `chrome-headless-shell`, `chromium`, `google-chrome` or `chrome` on `PATH`. A `--chrome`/`MIL_CHROME` path that is not a file is an error; CDP mode fails visibly rather than silently falling back to Blitz. `MIL_CHROME` is ignored in Blitz mode. CDP mode also costs roughly 100–300 MiB per browser instance and requires the external binary; see [Full JavaScript mode](../README.md#full-javascript-mode).
 
 Config lookup order (first match wins):
 
@@ -62,8 +75,8 @@ policy = "inline"      # inline | alt | sampling | omit
 protocol = "auto"      # auto | iterm2 | sixel | kitty
 
 [javascript]
-enabled = false
-timeout_ms = 1000
+enabled = false   # Blitz engine only; CDP mode always runs full JavaScript
+timeout_ms = 1000 # Blitz virtual timer budget, not a wall-clock kill switch
 
 [network]
 timeout_secs = 30

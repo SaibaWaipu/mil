@@ -59,6 +59,54 @@ jobs:
       - name: Run PTY end-to-end tests
         run: python3 scripts/e2e.py target/debug/mil
 
+  cdp-e2e:
+    name: CDP smoke (headless Chrome)
+    runs-on: ubuntu-latest
+    # This job downloads a browser and starts a real Chrome process; the
+    # download and CDP handshake can be flaky on pull requests, so keep it
+    # informational instead of blocking merges.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install chrome-headless-shell
+        run: npx --yes @puppeteer/browsers install chrome-headless-shell@stable --path /tmp/browsers
+      - name: Locate headless shell
+        id: chrome
+        run: |
+          CHROME="$(find /tmp/browsers -type f -name chrome-headless-shell -perm -u+x -print -quit)"
+          echo "path=$CHROME" >> "$GITHUB_OUTPUT"
+          test -n "$CHROME"
+      - name: Build mil
+        run: cargo build --bin mil
+      - name: CDP smoke on a local JavaScript page
+        env:
+          MIL_CHROME: ${{ steps.chrome.outputs.path }}
+          MIL_IMAGE_PROTOCOL: none
+        run: |
+          cat > /tmp/mil-cdp-smoke.html <<'HTML'
+          <!doctype html>
+          <title>CDP smoke</title>
+          <div id="out">loading</div>
+          <script>document.getElementById("out").textContent = "javascript-ran";</script>
+          HTML
+          python3 -m http.server 8765 --directory /tmp --bind 127.0.0.1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in 1 2 3 4 5; do
+            curl -fsS http://127.0.0.1:8765/mil-cdp-smoke.html >/dev/null && break
+            sleep 1
+          done
+          # `script` gives mil a PTY; send `q` once Chrome has had time to load
+          # the page and run its script. The timeout bounds a hung browser.
+          timeout 90s script -qec \
+            "target/debug/mil --engine cdp --no-session http://127.0.0.1:8765/mil-cdp-smoke.html" \
+            /dev/null < <(sleep 10; printf 'q')
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

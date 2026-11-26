@@ -22,6 +22,7 @@ url = { workspace = true }
 crossterm = { workspace = true }
 ratatui = { workspace = true }
 blitz-traits = "=0.2.0"
+mil-cdp = { path = "../mil-cdp" }
 mil-dom = { path = "../mil-dom" }
 mil-js = { path = "../mil-js" }
 mil-net = { path = "../mil-net" }

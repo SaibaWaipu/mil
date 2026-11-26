@@ -7,18 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> The core browser is implemented and verified in this tree: 98 workspace tests
-> pass, `cargo clippy --workspace --all-targets -- -D warnings` and
-> `cargo fmt --all -- --check` are clean, and local HTTP smoke tests confirmed
-> page rendering and JavaScript mutations. There is no published crates.io
-> release yet. See the [README](README.md) and [roadmap](docs/ROADMAP.md) for
-> the distinction between implemented and planned behaviour.
+> The core browser is implemented and verified in this tree: 133 workspace
+> unit/integration tests (mil 13, mil-cdp 28, mil-dom 10, mil-js 14, mil-net 17,
+> mil-paint 8, mil-session 15, mil-tui 28), one ignored real-browser integration
+> test in `mil-cdp`, and 18 PTY end-to-end scenarios. `cargo clippy --workspace
+> --all-targets -- -D warnings` and `cargo fmt --all -- --check` are clean, and
+> local HTTP smoke tests confirmed page rendering and JavaScript mutations.
+> There is no published crates.io release yet. See the [README](README.md) and
+> [roadmap](docs/ROADMAP.md) for the distinction between implemented and
+> planned behaviour.
 
 ### Added
 
 - Seven-crate workspace (`mil-app`, `mil-net`, `mil-dom`, `mil-paint`, `mil-tui`,
   `mil-js`, `mil-session`) producing the `mil` binary, with a stable-Rust build
-  and CI for fmt, clippy, tests and release builds on Linux, macOS and Windows.
+  and CI for fmt, clippy, tests and release builds on Linux, macOS and Windows,
+  plus the optional `mil-cdp` backend as an eighth crate.
+- Optional full-JavaScript CDP backend (`mil-cdp`): launches an external
+  `chrome-headless-shell`/Chromium via `chromiumoxide` 0.9.1, lets Chrome run
+  real scripts and CSS layout, extracts DOM text/image rectangles with a JS
+  `TreeWalker` (`getBoundingClientRect()` + `getComputedStyle()`), paints them
+  into the same `mil_paint::Surface` and reuses the existing TUI. `MIL_CHROME`
+  selects the executable; CDP costs ~100–300 MiB per instance and does not
+  bypass bot challenges.
 - Real HTML/CSS parsing, cascade and layout through exactly pinned Blitz crates:
   `blitz-dom =0.2.4`, `blitz-html =0.2.0`, `blitz-paint =0.2.1`,
   `blitz-traits =0.2.0`.
@@ -28,7 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes it into a ratatui `Buffer` with inline images via ratatui-image 11
   (iTerm2 OSC1337, Kitty, Sixel, half-blocks fallback or alt text).
 - `clap` CLI: optional positional `URL`, `--config PATH`, `--no-session`,
-  `--no-js`, repeatable `-v`, plus `--help` and `--version`.
+  `--no-js`, `--engine <blitz|cdp>` (default `blitz`), `--chrome <PATH>`,
+  repeatable `-v`, plus `--help` and `--version`.
+- A non-blocking `cdp-e2e` CI job that installs a headless shell with
+  `@puppeteer/browsers`, locates it, builds `mil` and runs a smoke with
+  `MIL_CHROME` set.
 - HTTP layer with `reqwest` + `rustls`, a manual in-memory cookie jar, up to ten
   redirects, gzip/brotli decoding, request timeouts and a bounded in-memory
   response cache; `Client::post_form` for `application/x-www-form-urlencoded`.
@@ -40,7 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Opt-in partial JavaScript via `rquickjs` 0.14: `JsDomMirror`, recorded
   `DomMutation` report, `apply_report`, bounded virtual timers, inline script
   execution and `Page::refresh_title()` after mutations. Enabled through
-  `[javascript] enabled`; forced off with `--no-js`.
+  `[javascript] enabled`; forced off with `--no-js` (Blitz mode only).
 - TOML configuration with built-in defaults, `MIL_CONFIG`/XDG path handling,
   keybinding overrides, and atomic `0600` writes for config, session and
   bookmarks. Search queries use the configured template's `{}` placeholder.
@@ -55,7 +70,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Blitz and companion crates are pinned to exact `=x.y.z` versions instead of
   caret ranges; upgrades are deliberate, tested changes.
 - JavaScript is opt-in at runtime (config/flag) rather than a compile-time
-  Cargo feature; it is disabled by default.
+  Cargo feature; it is disabled by default in Blitz mode. `--no-js` and
+  `[javascript] enabled` are Blitz-only: CDP mode always runs full JavaScript.
+  CDP reads the DOM as a snapshot re-read via `snapshot()` after interactions,
+  shares one browser engine across tabs, and loosely filters UI shortcuts that
+  can reach the page.
 - The CLI takes a positional URL; the previously planned `--url` and
   `--new-session` flags became a positional argument and `--no-session`.
 - Text rendering no longer relies on reverse-mapping Blitz glyph IDs: source

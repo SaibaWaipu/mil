@@ -4,13 +4,14 @@
 
 `mil` (pronounced "mill") is a keyboard-first web browser that runs entirely in your terminal. It uses the Blitz HTML/CSS engine to parse and lay out pages, then lowers the result into a terminal cell grid with `mil-paint` and ratatui. It is designed to feel like a native Unix command: `mil [URL]`, with sane defaults and no graphical desktop required.
 
-**Status:** the core browser is implemented and verified in this repository. All 103 workspace tests pass, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all -- --check` are clean, and 14 end-to-end tests drive the real binary through a PTY against a local HTTP server. There is no published crates.io release yet. Below, ✅ means implemented in this tree; 🚧 means partial, not yet usable end-to-end, or planned. See [Status and roadmap](#status-and-roadmap).
+**Status:** the core browser is implemented and verified in this repository. The workspace has 133 unit/integration tests (mil 13, mil-cdp 28, mil-dom 10, mil-js 14, mil-net 17, mil-paint 8, mil-session 15, mil-tui 28), one ignored real-browser integration test in `mil-cdp`, and 18 end-to-end tests that drive the real binary through a PTY against a local HTTP server. `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all -- --check` are clean. An optional CDP backend provides full JavaScript; it needs an external `chrome-headless-shell` binary. There is no published crates.io release yet. Below, ✅ means implemented in this tree; 🚧 means partial, not yet usable end-to-end, or planned. See [Status and roadmap](#status-and-roadmap).
 
 ## Why it exists
 
 - **Real layout instead of text dumps.** Blitz (`blitz-dom` 0.2.4, `blitz-html` 0.2.0, `blitz-paint` 0.2.1, `blitz-traits` 0.2.0, pinned exactly) provides genuine HTML parsing, CSS cascade and layout.
 - **Hybrid text rendering.** Blitz paints font glyph IDs that cannot be mapped back to source text, so `mil` walks the resolved DOM inline layouts for text and uses Blitz's paint output for backgrounds and images. Cells stay selectable and readable.
-- **Small footprint.** No Chromium and no GUI toolkit — just a terminal and a Rust binary. It is much smaller than Chromium, though not tiny: Stylo, Taffy and Parley are linked in.
+- **Small footprint by default.** No Chromium and no GUI toolkit in the default path — just a terminal and a Rust binary. It is much smaller than Chromium, though not tiny: Stylo, Taffy and Parley are linked in. The optional CDP backend trades that footprint for full JavaScript.
+- **Optional full JavaScript.** `--engine cdp` drives an external headless Chrome through the Chrome DevTools Protocol and lowers its page into the same terminal surface. Blitz stays the lightweight default.
 - **Native command ergonomics.** `mil https://example.com`, sensible defaults, TOML configuration in an XDG location, and mutable state kept out of the config directory.
 - **Keyboard-first.** Vim-like scrolling, tabs, history, bookmarks, link activation and mouse wheel/click support, all without leaving the terminal.
 
@@ -18,8 +19,9 @@
 
 ### Core
 
-- ✅ `mil [URL]` command-line interface with optional URL, `--config`, `--no-session`, `--no-js`, repeatable `-v`, plus Clap's `--help` and `--version`.
-- ✅ Real HTML/CSS parsing and layout via exactly pinned Blitz 0.2.x crates.
+- ✅ `mil [URL]` command-line interface with optional URL, `--config`, `--no-session`, `--no-js`, `--engine` and `--chrome`, repeatable `-v`, plus Clap's `--help` and `--version`.
+- ✅ Real HTML/CSS parsing and layout via exactly pinned Blitz 0.2.x crates (default engine).
+- ✅ An opt-in CDP engine for full JavaScript (🚧 requires an external browser binary and ~100–300 MiB; see [Full JavaScript mode](#full-javascript-mode)).
 - ✅ Terminal cell-grid painting with `mil-paint`, ratatui and crossterm; bold, italic and underline become cell attributes.
 - ✅ Keyboard scrolling (line, page, top, bottom), reload, history back/forward, tabs, bookmarks (`b`) and mouse wheel/click navigation.
 - ✅ Resolved text placed into cells from DOM inline layouts, with backgrounds and inline images composited on top.
@@ -37,7 +39,8 @@
 
 - ✅ Partial JavaScript via `rquickjs` 0.14, **opt-in and disabled by default**: `document.title`/`cookie`/`write`, `getElementById`, `querySelector`/`querySelectorAll`, `textContent`, limited `innerHTML`, `style`/`classList`/attributes, `addEventListener`/`click`, `setTimeout`/`setInterval`, `console`/`alert`, `location` and a placeholder `fetch`. Inline scripts run against a mirrored DOM; their writes are applied to the live document and relayout is triggered.
 - ✅ Inline images through ratatui-image 11: capability detection selects iTerm2 (OSC1337), Kitty or Sixel, with a half-blocks fallback (or alt text when no graphics protocol is available).
-- 🚧 Full JavaScript compatibility, SPAs, and per-policy/per-protocol image overrides in the running binary.
+- ✅ Full JavaScript via the optional CDP backend (chromiumoxide 0.9.1 + `chrome-headless-shell`): Chrome parses, scripts and lays out the page; a JS walker measures text and image rectangles which are painted into the same `mil-paint::Surface` and shown in the same TUI. 🚧 JS is always on in this mode, so `--no-js` has no effect; interactions use DOM snapshots and some UI shortcuts can reach the page.
+- 🚧 Full JavaScript compatibility in the default Blitz engine, and per-policy/per-protocol image overrides in the running binary. Full JS is available through `--engine cdp` (see below).
 
 ### Configuration and platform
 
@@ -61,6 +64,14 @@ This installs the `mil` binary. A recent stable Rust toolchain is required; see 
 cargo run -p mil -- https://example.com
 ```
 
+CDP mode additionally needs a Chrome-compatible executable. If you do not already have Chromium installed, fetch `chrome-headless-shell` with:
+
+```sh
+npx @puppeteer/browsers install chrome-headless-shell@stable --path ~/.cache/puppeteer
+```
+
+Then point `mil` at it with `--chrome PATH` or `MIL_CHROME=PATH`. Without a browser binary, the default Blitz mode still works; `--engine cdp` fails with a visible error rather than silently falling back.
+
 ## Quick start
 
 ```sh
@@ -79,10 +90,38 @@ A URL without a scheme is treated as `https://` when it looks like a host. Other
 | `URL` | Optional URL, bare host, or search query to open on startup. |
 | `--config PATH` | Load an alternate TOML configuration file. |
 | `--no-session` | Do not restore a previous session, and do not save one on exit. |
-| `--no-js` | Disable JavaScript even when enabled in the config. |
+| `--no-js` | Disable JavaScript even when enabled in the config. Blitz only; no effect with `--engine cdp`. |
+| `--engine <blitz\|cdp>` | Select the rendering backend. Defaults to `blitz`; `cdp` runs full JavaScript in an external headless Chrome. |
+| `--chrome <PATH>` | Chrome/Chromium-compatible executable for CDP mode; takes precedence over `MIL_CHROME` and auto-detection. |
 | `-v`, `--verbose` | Increase logging verbosity; repeatable (`warn` → `info` → `debug` → `trace`). |
 | `-h`, `--help` | Show Clap's help output. |
 | `-V`, `--version` | Show the version. |
+
+## Full JavaScript mode
+
+The default Blitz engine runs a small, opt-in JavaScript facade. For pages that need real JavaScript, opt into the CDP backend:
+
+```sh
+mil --engine cdp https://github.com
+```
+
+This launches `chrome-headless-shell` (or another Chromium-compatible binary) via chromiumoxide 0.9.1, lets Chrome run the page's own JavaScript and CSS, walks the rendered DOM with a JS `TreeWalker` (`getBoundingClientRect()` plus `getComputedStyle()`), and converts the measured text and image rectangles into the same `mil_paint::Surface` the Blitz path paints. The TUI, keybindings, tabs, history and session code are unchanged.
+
+**Costs and caveats — read these before opting in:**
+
+- A browser instance costs roughly **100–300 MiB** of resident memory plus a child process. You supply the executable; `mil` does not bundle or download one. Blitz remains the lightweight default.
+- `--no-js` has **no effect** in CDP mode: JavaScript is always on. `[javascript] enabled` in `config.toml` applies only to Blitz.
+- The terminal sees a **snapshot** of the DOM taken on navigation/load. Interactions re-read it with `snapshot()` without reloading, so in-page state survives, but live DOM mutations are not pushed to the screen until the next snapshot.
+- **One CDP engine serves all tabs.** Because the app cannot tell which keys the TUI consumed, UI shortcuts (`q`, `Ctrl-L`, `Ctrl-T`, `r`, find-prompt typing, …) can also reach the page.
+- **Bot challenges are not bypassed.** With a datacenter IP, Google Search still returns a `/sorry/index` challenge even in CDP mode. That is anti-bot detection, not a renderer limitation. Bing, Wikipedia, Hacker News and GitHub render with full JavaScript.
+
+Relevant environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `MIL_CHROME` | Path to the Chrome-compatible executable. `--chrome PATH` overrides it; otherwise `mil` checks well-known locations and then `PATH`. |
+| `MIL_IMAGE_PROTOCOL` | `none`, `off` or `halfblocks` skips terminal graphics probing (useful in tmux/CI). Applies to both engines. |
+| `MIL_LOAD_STYLESHEETS` | Blitz only: fetch linked CSS. Irrelevant in CDP mode, where Chrome loads stylesheets itself. |
 
 ## Keyboard and mouse
 
@@ -112,15 +151,16 @@ Bindings are resolved from `DEFAULT_BINDINGS` in `mil-tui` and can be overridden
 2. `doc.resolve()` runs the CSS cascade and layout. Because Blitz emits opaque font glyph IDs rather than source text, `Page::text_runs()` recovers graphemes and styles from the resolved inline layouts, while `blitz-paint` supplies element backgrounds and image rectangles.
 3. `render_page()` writes those pieces into a `Surface`: a cell grid (glyph, foreground/background colour, text attributes) plus placed PNG images.
 4. `mil-tui` copies the visible cells into a ratatui `Buffer` and hands images to ratatui-image, which emits the appropriate terminal graphics escapes. Ratatui diffs the buffer against the previous frame when drawing.
-5. If JavaScript is enabled, inline scripts run in a fresh rquickjs context against a `JsDomMirror`. Mutations are applied to the live document, `Page::refresh_title()` re-reads the title, and the page is resolved and repainted again.
+5. If JavaScript is enabled in Blitz mode, inline scripts run in a fresh rquickjs context against a `JsDomMirror`. Mutations are applied to the live document, `Page::refresh_title()` re-reads the title, and the page is resolved and repainted again.
+6. With `--engine cdp`, steps 1–2 and 5 are replaced: Chrome fetches, scripts and lays out the page; `mil-cdp` evaluates a JS walker, paints the returned spans into a `Surface`, and both paths rejoin at `mil-tui` (step 4). The Blitz JS facade is not invoked in CDP mode.
 
-The event loop runs on a current-thread Tokio runtime because `blitz_dom::BaseDocument` is `!Send`; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
+The event loop runs on a current-thread Tokio runtime because `blitz_dom::BaseDocument` is `!Send`; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details, including the CDP backend's process lifecycle and input forwarding.
 
 ## Configuration
 
 Configuration is read from `~/.config/mil/config.toml` (or `$XDG_CONFIG_HOME/mil/config.toml`, or the file named by `MIL_CONFIG`). A missing file simply means built-in defaults are used; `mil` does not create one automatically on first run. Mutable state lives separately in `~/.local/state/mil/` (`session.json` and `bookmarks.json`). Writes are atomic and, on Unix, created with mode `0600`.
 
-JavaScript is **off by default**; enable it with `[javascript] enabled = true` (or disable it for one run with `--no-js`). The search template is `search_engine = "https://www.bing.com/search?q={}"`, where `{}` is the URL-encoded query placeholder. Theme, keybinding, image, network and UI sections are documented in [docs/CONFIG.md](docs/CONFIG.md).
+JavaScript is **off by default** in Blitz mode; enable it with `[javascript] enabled = true` (or disable it for one run with `--no-js`). Neither switch affects `--engine cdp`, where JavaScript is always on. The search template is `search_engine = "https://www.bing.com/search?q={}"`, where `{}` is the URL-encoded query placeholder. Theme, keybinding, image, network and UI sections are documented in [docs/CONFIG.md](docs/CONFIG.md).
 
 ## Limitations
 
@@ -129,14 +169,16 @@ JavaScript is **off by default**; enable it with `[javascript] enabled = true` (
 - **Cell-grid rendering is lossy.** A terminal grid has no sub-cell precision or exact fonts. Text is placed by reading-order grapheme spans rather than pixel-perfect glyph positions, so absolute positioning, precise spacing and pixel-perfect CSS are out of scope.
 - **Single-threaded by necessity.** `BaseDocument` is `!Send`, so the document, JS context and surface stay on one current-thread Tokio runtime. Network requests are still async.
 - **Binary size.** Much smaller than Chromium, but Stylo, Taffy and Parley are linked in.
+- **CDP mode is optional and heavy.** It requires an external `chrome-headless-shell`/Chromium binary and ~100–300 MiB per instance; the page is a snapshot, UI shortcuts may leak into the page, one engine serves all tabs, and `--no-js` is ignored.
+- **No bot-challenge bypass.** Google Search from a datacenter IP still returns `/sorry/index` in CDP mode; CAPTCHAs and anti-bot gates are out of scope.
 - **Not a general-purpose browser.** No extensions, PDFs, DRM, WebGL, video playback, service workers or media playback. Windows support is best-effort.
 - **Work in progress.** Find highlighting, a full help screen, link focus rings, end-to-end form submission, scripted image policy overrides, benchmark results and per-OS release smoke tests are still open.
 
 ## Real-world surfing notes
 
-`mil` reads the HTML a server sends, so usable sites are mostly those with a real server-rendered page: Hacker News, Wikipedia, Bing search, and many documentation sites work reasonably. Google Search stopped shipping results in its HTML in 2025 and now shows a "No readable content" hint in `mil`; DuckDuckGo's HTML endpoint and some large sites serve bot challenges. The default search template uses Bing, which still returns static results.
+`mil` reads the HTML a server sends, so usable sites in the default Blitz mode are mostly those with a real server-rendered page: Hacker News, Wikipedia, Bing search, and many documentation sites work reasonably. Google Search stopped shipping results in its HTML in 2025 and now shows a "No readable content" hint in `mil`; DuckDuckGo's HTML endpoint and some large sites serve bot challenges. The default search template uses Bing, which still returns static results. In `--engine cdp` mode Bing, Wikipedia, Hacker News and GitHub render with full JavaScript, but Google still presents a `/sorry/index` bot challenge from datacenter IPs — anti-bot detection, not a renderer limitation.
 
-Linked CSS can be fetched with `MIL_LOAD_STYLESHEETS=1`, but it is **off by default**: Blitz 0.2 does not implement every selector modern sites use to hide menus, so applying their CSS can expose hidden content. `MIL_IMAGE_PROTOCOL=none` skips terminal graphics probing (useful in tmux/CI).
+Linked CSS can be fetched with `MIL_LOAD_STYLESHEETS=1` **in Blitz mode only**, and it is off by default: Blitz 0.2 does not implement every selector modern sites use to hide menus, so applying their CSS can expose hidden content. Chrome loads stylesheets itself in CDP mode, so the variable has no effect there. `MIL_IMAGE_PROTOCOL=none` skips terminal graphics probing (useful in tmux/CI) with either engine.
 
 ## Testing
 
@@ -147,7 +189,7 @@ cargo build --bin mil
 python3 scripts/e2e.py target/debug/mil
 ```
 
-The suite uses only the Python standard library and runs in CI. Set `MIL_IMAGE_PROTOCOL=none` to skip terminal graphics capability probes in headless environments.
+The suite uses only the Python standard library and runs in CI, alongside the 133 Rust unit/integration tests. `mil-cdp` also has one ignored real-browser integration test (`cargo test -p mil-cdp -- --ignored --nocapture`), which needs a local `chrome-headless-shell` and network access. Set `MIL_IMAGE_PROTOCOL=none` to skip terminal graphics capability probes in headless environments.
 
 ## Status and roadmap
 
